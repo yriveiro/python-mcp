@@ -1,30 +1,32 @@
 import json
 import re
 from collections import Counter
-from collections.abc import Callable, Iterable, Sequence
-from typing import Any, cast
+from collections.abc import Callable, Iterable
+from dataclasses import dataclass
+from typing import cast
 
-from python_mcp.models import (
-    CheckLevel,
-    DiagnosticLevel,
-    RuffError,
-    TokenMetrics,
-    TyError,
-)
+from python_mcp.models import CheckLevel, DiagnosticLevel, Finding, TokenMetrics
 
 __all__ = [
     "AGGREGATE_MIN_FILES",
     "AGGREGATE_MIN_ISSUES",
     "MAX_DETAIL_LINES",
+    "Collection",
     "calculate_metrics",
     "estimate_tokens",
     "filter_ty_level",
-    "format_ruff_check",
-    "format_ruff_format",
-    "format_ty_check",
-    "parse_ruff_check",
+    "format_collection",
+    "format_findings",
+    "format_unformatted",
+    "parse_bandit",
+    "parse_codespell",
+    "parse_deptry",
+    "parse_pytest_collect",
+    "parse_pydoclint",
+    "parse_ruff",
     "parse_ruff_format",
-    "parse_ty_check",
+    "parse_ty",
+    "parse_vulture",
 ]
 
 AGGREGATE_MIN_ISSUES = 25
@@ -32,6 +34,12 @@ AGGREGATE_MIN_FILES = 6
 MAX_DETAIL_LINES = 50
 
 _TY_SEVERITY: dict[str, DiagnosticLevel] = {"major": "error", "minor": "warning"}
+_BANDIT_LEVEL: dict[str, DiagnosticLevel] = {
+    "HIGH": "error",
+    "MEDIUM": "warning",
+    "LOW": "info",
+}
+_DEPTREY_LEVEL: dict[str, DiagnosticLevel] = {"DEP004": "warning"}
 
 _RUFF_CONCISE = re.compile(
     r"^([^:]+):(\d+):(\d+):\s+(\w+)\s+(\[\*\]\s+)?(.+)$",
@@ -41,6 +49,21 @@ _TY_CONCISE = re.compile(
     r"^([^:]+):(\d+):(\d+):\s*(error|warning|info)\[([^\]]+)\]\s+(.+)$",
     re.MULTILINE,
 )
+_VULTURE_CONCISE = re.compile(
+    r"^(.+):(\d+):\s+(.+?)(?:\s+\((\d+)% confidence\))?$", re.MULTILINE
+)
+_DEPTREY_CONCISE = re.compile(r"^([^:]+):(\d+):(\d+):\s+(\w+)\s+(.+)$", re.MULTILINE)
+_CODESPELL_CONCISE = re.compile(r"^(.+):(\d+):\s+(.+?)\s+==>\s+(.+)$", re.MULTILINE)
+_PYTEST_COLLECT_ERROR = re.compile(r"^ERROR\s+(.+)$", re.MULTILINE)
+_PYDOCLINT_VIOLATION = re.compile(r"^\s+(\d+):\s+(DOC\d+):\s+(.+)$", re.MULTILINE)
+
+
+@dataclass(frozen=True, slots=True)
+class Collection:
+    """Parsed ``pytest --collect-only`` output."""
+
+    tests: list[str]
+    errors: list[Finding]
 
 
 def estimate_tokens(text: str) -> int:
@@ -68,7 +91,7 @@ def calculate_metrics(raw_output: str, processed_output: str) -> TokenMetrics:
         processed_output: Compact output the model actually sees.
 
     Returns:
-        Token metrics for the run.
+        TokenMetrics: Token metrics for the run.
     """
     raw_tokens = estimate_tokens(raw_output)
     processed_tokens = estimate_tokens(processed_output)
@@ -84,7 +107,7 @@ def calculate_metrics(raw_output: str, processed_output: str) -> TokenMetrics:
     )
 
 
-def parse_ruff_check(output: str) -> list[RuffError]:
+def parse_ruff(output: str) -> list[Finding]:
     """
     Parse ruff JSON output into findings, with a concise-text fallback.
 
@@ -92,11 +115,11 @@ def parse_ruff_check(output: str) -> list[RuffError]:
         output: Combined stdout and stderr of ``ruff check``.
 
     Returns:
-        Parsed lint findings, or ``[]`` when nothing was found.
+        list[Finding]: Parsed lint findings, or ``[]`` when nothing was found.
     """
     try:
         return [
-            RuffError(
+            Finding(
                 file=item["filename"],
                 line=item["location"]["row"],
                 col=item["location"]["column"],
@@ -111,7 +134,7 @@ def parse_ruff_check(output: str) -> list[RuffError]:
         ]
     except json.JSONDecodeError, KeyError, TypeError:
         return [
-            RuffError(
+            Finding(
                 file=match[1],
                 line=int(match[2]),
                 col=int(match[3]),
@@ -123,9 +146,9 @@ def parse_ruff_check(output: str) -> list[RuffError]:
         ]
 
 
-def parse_ty_check(output: str) -> list[TyError]:
+def parse_ty(output: str) -> list[Finding]:
     """
-    Parse ty GitLab code-quality JSON into diagnostics.
+    Parse ty GitLab code-quality JSON into findings.
 
     Falls back to parsing the concise text format for older ty versions.
 
@@ -133,11 +156,11 @@ def parse_ty_check(output: str) -> list[TyError]:
         output: Combined stdout and stderr of ``ty check``.
 
     Returns:
-        Parsed diagnostics, or ``[]`` when nothing was found.
+        list[Finding]: Parsed diagnostics, or ``[]`` when nothing was found.
     """
     try:
         return [
-            TyError(
+            Finding(
                 file=item["location"]["path"],
                 line=item["location"]["positions"]["begin"]["line"],
                 col=item["location"]["positions"]["begin"]["column"],
@@ -149,7 +172,7 @@ def parse_ty_check(output: str) -> list[TyError]:
         ]
     except json.JSONDecodeError, KeyError, TypeError:
         return [
-            TyError(
+            Finding(
                 file=match[1],
                 line=int(match[2]),
                 col=int(match[3]),
@@ -161,6 +184,129 @@ def parse_ty_check(output: str) -> list[TyError]:
         ]
 
 
+def parse_vulture(output: str) -> list[Finding]:
+    """Parse vulture's concise dead-code findings."""
+    return [
+        Finding(
+            file=match[1],
+            line=int(match[2]),
+            message=match[3].strip(),
+            confidence=int(match[4]) if match[4] else None,
+        )
+        for match in _VULTURE_CONCISE.finditer(output)
+    ]
+
+
+def parse_bandit(output: str) -> list[Finding]:
+    """
+    Parse bandit JSON output into security findings.
+
+    Args:
+        output: Combined stdout and stderr of ``bandit -f json``.
+
+    Returns:
+        list[Finding]: Parsed security findings, or ``[]`` when nothing was found.
+    """
+    try:
+        data = json.loads(output)
+    except json.JSONDecodeError, TypeError:
+        return []
+
+    findings: list[Finding] = []
+
+    for item in data.get("results", []):
+        severity = item.get("issue_severity")
+        findings.append(
+            Finding(
+                file=item["filename"],
+                line=item.get("line_number", 0),
+                col=item.get("col_offset", 0) + 1,
+                code=item.get("test_id"),
+                message=item["issue_text"],
+                level=_BANDIT_LEVEL.get(severity, "error"),
+                severity=severity,
+            )
+        )
+
+    return findings
+
+
+def parse_deptry(output: str) -> list[Finding]:
+    """
+    Parse deptry's concise text output into dependency findings.
+
+    Args:
+        output: Combined stdout and stderr of ``deptry --no-ansi``.
+
+    Returns:
+        list[Finding]: Parsed dependency findings, or ``[]`` when nothing was
+        found.
+    """
+    return [
+        Finding(
+            file=match[1],
+            line=int(match[2]),
+            col=int(match[3]),
+            code=match[4],
+            level=_DEPTREY_LEVEL.get(match[4], "error"),
+            message=match[5].strip(),
+        )
+        for match in _DEPTREY_CONCISE.finditer(output)
+    ]
+
+
+def parse_codespell(output: str) -> list[Finding]:
+    """
+    Parse codespell's concise output into typo findings.
+
+    Args:
+        output: Combined stdout and stderr of ``codespell``.
+
+    Returns:
+        list[Finding]: Parsed typo findings, or ``[]`` when nothing was found.
+    """
+    return [
+        Finding(
+            file=match[1],
+            line=int(match[2]),
+            message=match[3].strip(),
+            suggestion=match[4].strip(),
+        )
+        for match in _CODESPELL_CONCISE.finditer(output)
+    ]
+
+
+def parse_pydoclint(output: str) -> list[Finding]:
+    """
+    Parse pydoclint output into docstring violations.
+
+    Args:
+        output: Combined stdout and stderr of ``pydoclint``.
+
+    Returns:
+        list[Finding]: Parsed violations, or ``[]`` when nothing was found.
+    """
+    current_file: str | None = None
+    findings: list[Finding] = []
+
+    for line in output.splitlines():
+        if not line.startswith((" ", "\t")):
+            current_file = line.strip()
+            continue
+        match = _PYDOCLINT_VIOLATION.match(line)
+        if match and current_file:
+            findings.append(
+                Finding(
+                    file=current_file,
+                    line=int(match[1]),
+                    code=match[2],
+                    message=match[3],
+                )
+            )
+
+    return findings
+
+
 def parse_ruff_format(output: str) -> list[str]:
     """
     Extract the files needing reformatting from ``ruff format --check``.
@@ -169,7 +315,7 @@ def parse_ruff_format(output: str) -> list[str]:
         output: Combined stdout and stderr of ``ruff format --check``.
 
     Returns:
-        The unformatted file paths.
+        list[str]: The unformatted file paths.
     """
     return [
         line.removeprefix("Would reformat: ").strip()
@@ -178,131 +324,217 @@ def parse_ruff_format(output: str) -> list[str]:
     ]
 
 
+def parse_pytest_collect(output: str) -> Collection:
+    """
+    Parse ``pytest --collect-only -q`` output into tests and collection errors.
+
+    Args:
+        output: Combined stdout and stderr of ``pytest --collect-only -q``.
+
+    Returns:
+        Collection: The collected test node IDs and any collection-error
+        findings.
+    """
+    tests = [
+        line.strip()
+        for line in output.splitlines()
+        if "::" in line and not line.startswith((" ", "E", "!", "-", "_"))
+    ]
+    errors = [
+        Finding(file=match[1], message="pytest collection error")
+        for match in _PYTEST_COLLECT_ERROR.finditer(output)
+    ]
+
+    return Collection(tests=tests, errors=errors)
+
+
+def filter_ty_level(findings: list[Finding], level: CheckLevel) -> list[Finding]:
+    """
+    Filter ty diagnostics by severity.
+
+    Args:
+        findings: Parsed diagnostics.
+        level: ``error`` keeps errors, ``warning`` keeps warnings and errors,
+            ``all`` keeps everything.
+
+    Returns:
+        list[Finding]: The filtered diagnostics.
+    """
+    match level:
+        case "error":
+            return [finding for finding in findings if finding.level == "error"]
+        case "warning":
+            return [finding for finding in findings if finding.level == "warning"]
+        case _:
+            return findings
+
+
+def format_findings(
+    findings: list[Finding],
+    *,
+    name: str,
+    empty_message: str,
+    render_line: Callable[[Finding], str],
+) -> str:
+    """
+    Format findings compactly, aggregated for large result sets.
+
+    Args:
+        findings: Findings to format.
+        name: Tool label used in the header (e.g. ``ruff``).
+        empty_message: Output when there are no findings.
+        render_line: One-line rendering of a single finding.
+
+    Returns:
+        str: The compact, token-efficient output.
+    """
+    if not findings:
+        return empty_message
+    if _use_aggregate(findings):
+        return _format_aggregate(findings, name=name, render_line=render_line)
+
+    return _format_grouped(
+        header=_header(findings, name),
+        findings=findings,
+        render_line=render_line,
+    )
+
+
+def format_unformatted(files: list[str], *, name: str) -> str:
+    """
+    Format the list of unformatted files compactly.
+
+    Args:
+        files: Files needing reformatting.
+        name: Tool label used in the header.
+
+    Returns:
+        str: The compact output.
+    """
+    if not files:
+        return "All files properly formatted."
+
+    lines = [f"{name}: {len(files)} files need formatting", ""]
+    lines.extend(f"  {file}" for file in sorted(files))
+
+    return "\n".join(lines).strip()
+
+
+def format_collection(collection: Collection, *, name: str, empty_message: str) -> str:
+    """
+    Format collected tests and collection errors compactly.
+
+    Args:
+        collection: Parsed pytest collection output.
+        name: Tool label used in the header.
+        empty_message: Output when nothing was collected.
+
+    Returns:
+        str: The compact output.
+    """
+    if collection.errors:
+        lines = [f"{name}: {len(collection.errors)} collection errors", ""]
+        lines.extend(
+            f"  {error.file}: {error.message}"
+            for error in sorted(collection.errors, key=lambda error: error.file)
+        )
+
+        return "\n".join(lines).strip()
+
+    if not collection.tests:
+        return empty_message
+
+    lines = [f"{name}: {len(collection.tests)} tests collected", ""]
+    lines.extend(f"  {test}" for test in sorted(collection.tests))
+
+    return "\n".join(lines).strip()
+
+
 def _ty_description(code: str, description: str) -> str:
     """Remove GitLab's duplicated ``<code>: `` message prefix."""
     return description.removeprefix(f"{code}: ")
 
 
-def filter_ty_level(errors: list[TyError], level: CheckLevel) -> list[TyError]:
-    """
-    Filter ty diagnostics by severity.
+def _header(findings: list[Finding], name: str) -> str:
+    """Build the compact header line for a result set."""
+    files = len({finding.file for finding in findings})
 
-    Args:
-        errors: Parsed diagnostics.
-        level: ``error`` keeps errors, ``warning`` keeps warnings and errors,
-            ``all`` keeps everything.
-
-    Returns:
-        The filtered diagnostics.
-    """
-    match level:
-        case "error":
-            return [error for error in errors if error.level == "error"]
-        case "warning":
-            return [error for error in errors if error.level == "warning"]
-        case _:
-            return errors
+    return f"{name}: {len(findings)} issues in {files} files"
 
 
-def format_ruff_check(errors: list[RuffError]) -> str:
-    """Format ruff findings compactly, aggregated for large result sets."""
-    if not errors:
-        return "No lint issues found."
-    if _use_aggregate(errors):
-        return _format_ruff_aggregate(errors)
-
-    return _format_grouped(
-        header=_ruff_header(errors),
-        errors=errors,
-        lines=lambda err: [
-            f"  L{err.line}:{err.col} [{err.code}{'*' if err.fixable else ''}] "
-            f"{err.message}"
-        ],
-    )
-
-
-def format_ty_check(errors: list[TyError]) -> str:
-    """Format ty diagnostics compactly, aggregated for large result sets."""
-    if not errors:
-        return "No type errors found."
-    if _use_aggregate(errors):
-        return _format_ty_aggregate(errors)
-
-    return _format_grouped(
-        header=_ty_header(errors),
-        errors=errors,
-        lines=lambda err: [
-            f"  L{err.line}:{err.col} [{_level_mark(err.level)}:{err.code}] "
-            f"{err.message}"
-        ],
-    )
-
-
-def format_ruff_format(files: list[str]) -> str:
-    """Format the list of unformatted files compactly."""
-    if not files:
-        return "All files properly formatted."
-
-    lines = [f"ruff format: {len(files)} files need formatting", ""]
-    lines.extend(f"  {f}" for f in sorted(files))
-
-    return "\n".join(lines).strip()
-
-
-def _use_aggregate(errors: Sequence[Any]) -> bool:
+def _use_aggregate(findings: list[Finding]) -> bool:
     """True when the result set is large enough to warrant rollups."""
     return (
-        len(errors) >= AGGREGATE_MIN_ISSUES
-        or len({err.file for err in errors}) >= AGGREGATE_MIN_FILES
+        len(findings) >= AGGREGATE_MIN_ISSUES
+        or len({finding.file for finding in findings}) >= AGGREGATE_MIN_FILES
     )
 
 
 def _format_grouped(
+    *,
     header: str,
-    errors: Sequence[Any],
-    lines: Callable[[Any], list[str]],
+    findings: list[Finding],
+    render_line: Callable[[Finding], str],
 ) -> str:
     """Format findings grouped by file, the plugin's compact layout."""
-    by_file: dict[str, list[Any]] = {}
+    by_file: dict[str, list[Finding]] = {}
 
-    for err in sorted(errors, key=lambda error: (error.file, error.line)):
-        by_file.setdefault(err.file, []).append(err)
+    for finding in sorted(findings, key=lambda error: (error.file, error.line)):
+        by_file.setdefault(finding.file, []).append(finding)
 
     out = [header, ""]
 
     for file in sorted(by_file):
         out.append(f"## {file}")
 
-        for err in by_file[file]:
-            out.extend(lines(err))
+        for finding in by_file[file]:
+            out.append(render_line(finding))
         out.append("")
 
     return "\n".join(out).strip()
 
 
-def _ruff_header(errors: list[RuffError]) -> str:
-    """Build the compact header line for a ruff result."""
-    fixable = sum(1 for error in errors if error.fixable)
-    files = len({error.file for error in errors})
-    header = f"ruff: {len(errors)} issues in {files} files"
+def _format_aggregate(
+    findings: list[Finding],
+    *,
+    name: str,
+    render_line: Callable[[Finding], str],
+) -> str:
+    """Large-result layout: rule/file rollups plus flat diagnostic lines."""
+    out = [_header(findings, name), ""]
+    out.append("Top rules:")
 
-    return f"{header} ({fixable} fixable)" if fixable else header
+    for key, count in _ranked_counts(_rule_key(finding) for finding in findings):
+        out.append(f"  {key} ({count}x)")
+
+    out.append("")
+    out.append("Top files:")
+    by_file: dict[str, list[Finding]] = {}
+
+    for finding in findings:
+        by_file.setdefault(finding.file, []).append(finding)
+
+    for file, file_findings in _ranked_groups(by_file):
+        out.append(f"  {file} ({len(file_findings)} issues)")
+
+        for key, count in _ranked_counts(_rule_key(f) for f in file_findings):
+            out.append(f"    {key} ({count})")
+
+    out.append("")
+    out.append("Findings:")
+    details = sorted(findings, key=lambda error: (error.file, error.line, error.col))
+
+    for finding in details[:MAX_DETAIL_LINES]:
+        out.append(render_line(finding))
+
+    _append_omission(out, len(details), "findings")
+
+    return "\n".join(out).strip()
 
 
-def _ty_header(errors: list[TyError]) -> str:
-    """Build the compact header line for a ty result."""
-    error_count = sum(1 for error in errors if error.level == "error")
-    warning_count = sum(1 for error in errors if error.level == "warning")
-    files = len({error.file for error in errors})
-    parts = []
-
-    if error_count:
-        parts.append(f"{error_count} errors")
-
-    if warning_count:
-        parts.append(f"{warning_count} warnings")
-
-    return f"ty: {', '.join(parts)} in {files} files"
+def _rule_key(finding: Finding) -> str:
+    """Return the rule used for rollups, falling back to the message."""
+    return finding.code or finding.message
 
 
 def _level_mark(level: str) -> str:
@@ -312,76 +544,6 @@ def _level_mark(level: str) -> str:
             return "E"
         case _:
             return "W"
-
-
-def _format_ruff_aggregate(errors: list[RuffError]) -> str:
-    """Large-result layout: rule/file rollups plus flat diagnostic lines."""
-    out = [_ruff_header(errors), ""]
-    out.append("Top rules:")
-
-    for code, count in _ranked_counts(error.code for error in errors):
-        out.append(f"  {code} ({count}x)")
-
-    out.append("")
-    out.append("Top files:")
-    by_file: dict[str, list[RuffError]] = {}
-
-    for error in errors:
-        by_file.setdefault(error.file, []).append(error)
-
-    for file, file_errors in _ranked_groups(by_file):
-        out.append(f"  {file} ({len(file_errors)} issues)")
-
-        for code, count in _ranked_counts(err.code for err in file_errors):
-            out.append(f"    {code} ({count})")
-
-    out.append("")
-    out.append("Violations:")
-    details = sorted(errors, key=lambda error: (error.file, error.line, error.col))
-
-    for err in details[:MAX_DETAIL_LINES]:
-        fix = "*" if err.fixable else ""
-        out.append(f"  {err.file}:{err.line}:{err.col} {err.code}{fix} {err.message}")
-
-    _append_omission(out, len(details), "issues")
-
-    return "\n".join(out).strip()
-
-
-def _format_ty_aggregate(errors: list[TyError]) -> str:
-    """Large-result layout: rule/file rollups plus flat diagnostic lines."""
-    out = [_ty_header(errors), ""]
-    out.append("Top rules:")
-
-    for code, count in _ranked_counts(error.code for error in errors):
-        out.append(f"  {code} ({count}x)")
-
-    out.append("")
-    out.append("Top files:")
-    by_file: dict[str, list[TyError]] = {}
-
-    for error in errors:
-        by_file.setdefault(error.file, []).append(error)
-
-    for file, file_errors in _ranked_groups(by_file):
-        out.append(f"  {file} ({len(file_errors)} diagnostics)")
-
-        for code, count in _ranked_counts(err.code for err in file_errors):
-            out.append(f"    {code} ({count})")
-
-    out.append("")
-    out.append("Diagnostics:")
-    details = sorted(errors, key=lambda error: (error.file, error.line, error.col))
-
-    for err in details[:MAX_DETAIL_LINES]:
-        out.append(
-            f"  {err.file}:{err.line}:{err.col} [{_level_mark(err.level)}:{err.code}] "
-            f"{err.message}"
-        )
-
-    _append_omission(out, len(details), "diagnostics")
-
-    return "\n".join(out).strip()
 
 
 def _ranked_counts(values: Iterable[str]) -> list[tuple[str, int]]:

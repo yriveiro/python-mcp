@@ -6,26 +6,34 @@ type CheckLevel = Literal["all", "error", "warning"]
 type DiagnosticLevel = Literal["error", "warning", "info"]
 
 
-class RuffError(BaseModel):
-    """A single ruff lint finding."""
+class Finding(BaseModel):
+    """
+    A single diagnostic reported by a code-quality tool.
+
+    Attributes:
+        file: Path of the file the finding belongs to, relative when known.
+        message: Human-readable description of the finding.
+        line: 1-based line number, ``0`` when the tool reports no location.
+        col: 1-based column number, ``0`` when the tool reports no location.
+        code: Tool-specific issue code (e.g. ``F401`` or ``B101``).
+        level: Severity of the finding.
+        fixable: Whether the tool offers an automated fix.
+        confidence: Percent confidence for vulture findings.
+        severity: Raw severity label for bandit findings (``LOW``, ``MEDIUM``,
+            or ``HIGH``).
+        suggestion: Proposed correction for codespell findings.
+    """
 
     file: str
-    line: int
-    col: int
-    code: str
     message: str
+    line: int = 0
+    col: int = 0
+    code: str | None = None
+    level: DiagnosticLevel = "error"
     fixable: bool = False
-
-
-class TyError(BaseModel):
-    """A single ty type-checking diagnostic."""
-
-    file: str
-    line: int
-    col: int
-    level: DiagnosticLevel
-    code: str
-    message: str
+    confidence: int | None = None
+    severity: str | None = None
+    suggestion: str | None = None
 
 
 class TokenMetrics(BaseModel):
@@ -39,15 +47,15 @@ class TokenMetrics(BaseModel):
 
 class CheckResult(BaseModel):
     """
-    Result of a ruff or ty check run.
+    Result of a code-quality check run.
 
     Attributes:
         output: Token-efficient output for the model.
         exit_code: Exit code of the underlying command.
-        issues: Number of findings (lint issues, unformatted files, or type
-            diagnostics, depending on the tool).
-        fixable: Number of ruff findings with an available fix.
-        warnings: Number of warning-level ty diagnostics.
+        issues: Number of findings (lint issues, unformatted files, collection
+            errors, or diagnostics, depending on the tool).
+        fixable: Number of findings with an available fix.
+        warnings: Number of warning-level findings.
         saved_tokens: Estimated tokens removed from the raw output.
         savings_percent: Share of raw tokens removed, rounded.
     """

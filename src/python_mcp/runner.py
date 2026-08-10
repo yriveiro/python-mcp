@@ -2,23 +2,14 @@ import glob
 import logging
 import os
 import shlex
-import subprocess
+import subprocess  # nosec B404
 from pathlib import Path
+from typing import Protocol
 
 from pydantic import BaseModel
 
 from python_mcp.errors import ToolNotFoundError
-from python_mcp.formatting import (
-    calculate_metrics,
-    filter_ty_level,
-    format_ruff_check,
-    format_ruff_format,
-    format_ty_check,
-    parse_ruff_check,
-    parse_ruff_format,
-    parse_ty_check,
-)
-from python_mcp.models import CheckLevel, RuffError, TokenMetrics, TyError
+from python_mcp.models import CheckLevel, Finding, TokenMetrics
 
 logger = logging.getLogger(__name__)
 
@@ -41,9 +32,32 @@ class ToolResult(BaseModel):
     metrics: TokenMetrics | None = None
 
 
+class CheckTool(Protocol):
+    """Interface implemented by a read-only code-quality check."""
+
+    @property
+    def name(self) -> str:
+        """Return the MCP tool name."""
+        ...
+
+    def command(self, paths: list[str]) -> list[str]:
+        """Build the executable arguments for the target paths."""
+        ...
+
+    def process(
+        self,
+        result: ProcessResult,
+        cwd: str | Path,
+        *,
+        level: CheckLevel = "all",
+    ) -> ToolResult:
+        """Convert raw command output into a compact tool result."""
+        ...
+
+
 class ToolRunner:
     """
-    Execute ruff and ty using the project's configured environment.
+    Execute configured code-quality tools in the project's environment.
 
     Args:
         command_prefix: Prefix for tool invocations, usually ``"uv run"``.
@@ -58,90 +72,35 @@ class ToolRunner:
         self.command_prefix = shlex.split(command_prefix)
         self.command_timeout = command_timeout
 
-    def ruff_check(self, paths: list[str], cwd: str | Path) -> ToolResult:
-        """Run ruff check and compact its structured JSON output."""
-        command = [
-            *self.command_prefix,
-            "ruff",
-            "check",
-            "--output-format",
-            "json",
-            *paths,
-        ]
-        result = self._run(command, cwd)
-        errors = parse_ruff_check(result.output)
-        _relativize_paths(errors, cwd)
-        output = format_ruff_check(errors)
-
-        if result.exit_code != 0 and not errors:
-            output = result.output[:2000] or "Ruff check failed."
-
-        raw = _ruff_concise(errors)
-        metrics = calculate_metrics(raw, output)
-
-        return ToolResult(
-            output=output,
-            exit_code=result.exit_code,
-            issues=len(errors),
-            fixable=sum(error.fixable for error in errors),
-            metrics=metrics,
-        )
-
-    def ruff_format_check(self, paths: list[str], cwd: str | Path) -> ToolResult:
-        """Run ruff format in check mode and compact its output."""
-        command = [*self.command_prefix, "ruff", "format", "--check", *paths]
-        result = self._run(command, cwd)
-        files = parse_ruff_format(result.output)
-        output = format_ruff_format(files)
-
-        if result.exit_code != 0 and not files:
-            output = result.output[:2000] or "Ruff format check failed."
-
-        return ToolResult(
-            output=output,
-            exit_code=result.exit_code,
-            issues=len(files),
-            metrics=calculate_metrics(result.output, output),
-        )
-
-    def ty_check(
+    def run(
         self,
+        tool: CheckTool,
         paths: list[str],
-        level: CheckLevel,
         cwd: str | Path,
+        *,
+        level: CheckLevel = "all",
     ) -> ToolResult:
-        """Run ty with GitLab JSON output and filter by severity."""
-        command = [
-            *self.command_prefix,
-            "ty",
-            "check",
-            "--output-format",
-            "gitlab",
-            *paths,
-        ]
+        """
+        Execute a check tool and process its output.
+
+        Args:
+            tool: Tool implementation to execute.
+            paths: Paths passed to the tool.
+            cwd: Project directory used as the subprocess working directory.
+            level: Optional diagnostic severity filter.
+
+        Returns:
+            ToolResult: Compact output and execution metadata.
+        """
+        command = [*self.command_prefix, *tool.command(paths)]
         result = self._run(command, cwd)
-        all_errors = parse_ty_check(result.output)
-        _relativize_paths(all_errors, cwd)
-        errors = filter_ty_level(all_errors, level)
-        output = format_ty_check(errors)
 
-        if result.exit_code != 0 and not all_errors:
-            output = result.output[:2000] or "Ty check failed."
-
-        raw = _ty_concise(all_errors)
-
-        return ToolResult(
-            output=output,
-            exit_code=result.exit_code,
-            issues=len(errors),
-            warnings=sum(error.level == "warning" for error in errors),
-            metrics=calculate_metrics(raw, output),
-        )
+        return tool.process(result, cwd, level=level)
 
     def _run(self, command: list[str], cwd: str | Path) -> ProcessResult:
         """Run a command and capture output without raising on exit codes."""
         try:
-            result = subprocess.run(
+            result = subprocess.run(  # nosec B603
                 command,
                 capture_output=True,
                 text=True,
@@ -149,12 +108,12 @@ class ToolRunner:
                 cwd=str(cwd),
                 timeout=self.command_timeout,
             )
-        except FileNotFoundError as e:
+        except FileNotFoundError as error:
             raise ToolNotFoundError(
                 f"Executable not found: {command[0]}. "
                 "Install uv or set PYTHON_MCP_COMMAND_PREFIX to the project tooling."
-            ) from e
-        except subprocess.TimeoutExpired as e:
+            ) from error
+        except subprocess.TimeoutExpired as error:
             logger.error(
                 "command timed out after %s seconds: %s",
                 self.command_timeout,
@@ -163,7 +122,8 @@ class ToolRunner:
             raise ToolNotFoundError(
                 f"Command timed out after {self.command_timeout} seconds: "
                 f"{' '.join(command)}"
-            ) from e
+            ) from error
+
         return ProcessResult(
             output=(result.stdout + result.stderr).strip(),
             exit_code=result.returncode,
@@ -189,7 +149,6 @@ def changed_python_files(cwd: str | Path) -> list[str]:
 
 def resolve_paths(paths: list[str], cwd: str | Path) -> list[str]:
     """Expand glob patterns into concrete paths."""
-
     resolved: list[str] = []
 
     for pattern in paths:
@@ -201,10 +160,24 @@ def resolve_paths(paths: list[str], cwd: str | Path) -> list[str]:
     return resolved
 
 
+def relativize_paths(findings: list[Finding], cwd: str | Path) -> None:
+    """Make absolute diagnostic paths relative to the checked project."""
+    root = Path(cwd).resolve()
+
+    for finding in findings:
+        path = Path(finding.file)
+
+        if path.is_absolute():
+            try:
+                finding.file = os.fspath(path.resolve().relative_to(root))
+            except ValueError:
+                finding.file = os.fspath(path)
+
+
 def _run_git(command: list[str], cwd: str | Path) -> str | None:
     """Run a git command, returning stdout or ``None`` when it fails."""
     try:
-        result = subprocess.run(
+        result = subprocess.run(  # nosec B603
             command,
             capture_output=True,
             text=True,
@@ -215,45 +188,3 @@ def _run_git(command: list[str], cwd: str | Path) -> str | None:
         return None
 
     return result.stdout if result.returncode == 0 else None
-
-
-def _relativize_paths(errors: list[RuffError] | list[TyError], cwd: str | Path) -> None:
-    """Make absolute diagnostic paths relative to the checked project."""
-    root = Path(cwd).resolve()
-
-    for error in errors:
-        path = Path(error.file)
-
-        if path.is_absolute():
-            try:
-                error.file = os.fspath(path.resolve().relative_to(root))
-            except ValueError:
-                error.file = os.fspath(path)
-
-
-def _ruff_concise(errors: list[RuffError]) -> str:
-    """Reconstruct concise ruff output for savings comparison."""
-    lines = [
-        f"{error.file}:{error.line}:{error.col}: {error.code} "
-        f"{'[*] ' if error.fixable else ''}{error.message}"
-        for error in errors
-    ]
-
-    if errors:
-        lines.append(f"Found {len(errors)} errors.")
-
-    return "\n".join(lines)
-
-
-def _ty_concise(errors: list[TyError]) -> str:
-    """Reconstruct concise ty output for savings comparison."""
-    lines = [
-        f"{error.file}:{error.line}:{error.col}: {error.level}[{error.code}] "
-        f"{error.message}"
-        for error in errors
-    ]
-
-    if errors:
-        lines.append(f"Found {len(errors)} diagnostics")
-
-    return "\n".join(lines)

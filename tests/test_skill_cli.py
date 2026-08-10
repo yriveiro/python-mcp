@@ -13,6 +13,14 @@ def test_bundled_skill_names_include_python_mcp() -> None:
     assert "python-mcp" in bundled_skill_names()
 
 
+def test_package_source_is_ascii() -> None:
+    package_dir = Path(__file__).parents[1] / "src" / "python_mcp"
+
+    for path in package_dir.rglob("*"):
+        if path.is_file() and path.suffix in {".md", ".py"}:
+            path.read_bytes().decode("ascii")
+
+
 def test_install_skill_copies_to_agents_layout(tmp_path: Path) -> None:
     destination, files = install_skill("python-mcp", tmp_path)
 
@@ -23,6 +31,12 @@ def test_install_skill_copies_to_agents_layout(tmp_path: Path) -> None:
     assert "`ruff_check`" in contents
     assert "`ruff_format`" in contents
     assert "`ty_check`" in contents
+    assert "`vulture_check`" in contents
+    assert "`bandit_check`" in contents
+    assert "`deptry_check`" in contents
+    assert "`pytest_collect`" in contents
+    assert "`codespell_check`" in contents
+    assert "`pydoclint_check`" in contents
     assert "Their output is structured and intentionally compact." in contents
     assert "uv-mcp" not in contents
     assert files == sorted(

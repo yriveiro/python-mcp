@@ -5,13 +5,19 @@ from pathlib import Path
 from python_mcp.formatting import (
     calculate_metrics,
     filter_ty_level,
-    format_ruff_check,
-    format_ty_check,
-    parse_ruff_check,
-    parse_ty_check,
+    format_findings,
+    parse_bandit,
+    parse_codespell,
+    parse_deptry,
+    parse_pydoclint,
+    parse_pytest_collect,
+    parse_ruff,
+    parse_ty,
+    parse_vulture,
 )
-from python_mcp.models import RuffError, TyError
+from python_mcp.models import Finding
 from python_mcp.runner import ToolRunner, changed_python_files, resolve_paths
+from python_mcp.tooling import TOOLS
 
 
 def test_parse_ruff_json_preserves_colons_and_fixability() -> None:
@@ -27,10 +33,8 @@ def test_parse_ruff_json_preserves_colons_and_fixability() -> None:
         ]
     )
 
-    errors = parse_ruff_check(payload)
-
-    assert errors == [
-        RuffError(
+    assert parse_ruff(payload) == [
+        Finding(
             file="/tmp/project/a:b.py",
             line=2,
             col=8,
@@ -42,7 +46,7 @@ def test_parse_ruff_json_preserves_colons_and_fixability() -> None:
 
 
 def test_parse_ruff_concise_fallback() -> None:
-    errors = parse_ruff_check("a.py:2:8: F401 [*] unused import")
+    errors = parse_ruff("a.py:2:8: F401 [*] unused import")
 
     assert errors[0].code == "F401"
     assert errors[0].fixable
@@ -72,44 +76,144 @@ def test_parse_ty_gitlab_json_maps_severity() -> None:
         ]
     )
 
-    errors = parse_ty_check(payload)
+    errors = parse_ty(payload)
 
     assert [error.level for error in errors] == ["error", "warning"]
     assert errors[0].message == "bad: value"
 
 
 def test_parse_ty_concise_fallback() -> None:
-    errors = parse_ty_check("a.py:1:2: warning[code] message: with colon")
+    errors = parse_ty("a.py:1:2: warning[code] message: with colon")
 
     assert errors[0].level == "warning"
     assert errors[0].message == "message: with colon"
 
 
-def test_filter_ty_level() -> None:
-    errors = [
-        TyError(file="a.py", line=1, col=1, level="error", code="E", message="e"),
-        TyError(file="a.py", line=2, col=1, level="warning", code="W", message="w"),
-        TyError(file="a.py", line=3, col=1, level="info", code="I", message="i"),
+def test_parse_vulture_output() -> None:
+    errors = parse_vulture("src/a.py:12: unused function 'helper' (60% confidence)")
+
+    assert errors == [
+        Finding(
+            file="src/a.py",
+            line=12,
+            message="unused function 'helper'",
+            confidence=60,
+        )
     ]
 
-    assert len(filter_ty_level(errors, "error")) == 1
-    assert len(filter_ty_level(errors, "warning")) == 1
-    assert len(filter_ty_level(errors, "all")) == 3
+
+def test_parse_bandit_json() -> None:
+    payload = json.dumps(
+        {
+            "results": [
+                {
+                    "filename": "a.py",
+                    "line_number": 4,
+                    "col_offset": 2,
+                    "test_id": "B101",
+                    "issue_text": "Use of assert detected",
+                    "issue_severity": "LOW",
+                }
+            ]
+        }
+    )
+
+    assert parse_bandit(payload) == [
+        Finding(
+            file="a.py",
+            line=4,
+            col=3,
+            code="B101",
+            message="Use of assert detected",
+            level="info",
+            severity="LOW",
+        )
+    ]
 
 
-def test_small_ruff_result_uses_plugin_layout() -> None:
-    errors = [RuffError(file="a.py", line=1, col=1, code="F401", message="unused")]
+def test_parse_deptry_output() -> None:
+    errors = parse_deptry(
+        "src/a.py:3:8: DEP001 'requests' imported but missing from dependencies"
+    )
 
-    output = format_ruff_check(errors)
+    assert errors == [
+        Finding(
+            file="src/a.py",
+            line=3,
+            col=8,
+            code="DEP001",
+            message="'requests' imported but missing from dependencies",
+        )
+    ]
+
+
+def test_parse_codespell_output() -> None:
+    typo = "t" + "eh"
+    correction = "t" + "he"
+    errors = parse_codespell(f"README.md:4: {typo} ==> {correction}")
+
+    assert errors == [
+        Finding(file="README.md", line=4, message=typo, suggestion=correction)
+    ]
+
+
+def test_parse_pytest_collection() -> None:
+    collection = parse_pytest_collect(
+        "tests/test_a.py::test_one\n\n1 test collected in 0.01s"
+    )
+
+    assert collection.tests == ["tests/test_a.py::test_one"]
+    assert collection.errors == []
+
+
+def test_parse_pytest_collection_error() -> None:
+    collection = parse_pytest_collect("ERROR test_b.py\n\n1 error in 0.01s")
+
+    assert collection.errors == [
+        Finding(file="test_b.py", message="pytest collection error")
+    ]
+
+
+def test_parse_pydoclint_output() -> None:
+    findings = parse_pydoclint(
+        "src/a.py\nsrc/a.py\n"
+        "    4: DOC201: Function `x` does not have a return section\n"
+        "    9: DOC105: Argument names match, but types do not match: x\n"
+    )
+
+    assert findings == [
+        Finding(
+            file="src/a.py",
+            line=4,
+            code="DOC201",
+            message="Function `x` does not have a return section",
+        ),
+        Finding(
+            file="src/a.py",
+            line=9,
+            code="DOC105",
+            message="Argument names match, but types do not match: x",
+        ),
+    ]
+
+
+def test_format_findings_uses_grouped_layout() -> None:
+    output = format_findings(
+        [Finding(file="a.py", line=1, col=1, code="F401", message="unused")],
+        name="ruff",
+        empty_message="No lint issues found.",
+        render_line=lambda finding: (
+            f"  L{finding.line}:{finding.col} [{finding.code}] {finding.message}"
+        ),
+    )
 
     assert "## a.py" in output
     assert "L1:1 [F401] unused" in output
-    assert "Top rules:" not in output
 
 
-def test_large_ruff_result_uses_aggregate_layout() -> None:
+def test_large_result_uses_aggregate_layout() -> None:
     errors = [
-        RuffError(
+        Finding(
             file=f"file_{index % 6}.py",
             line=index + 1,
             col=1,
@@ -119,30 +223,28 @@ def test_large_ruff_result_uses_aggregate_layout() -> None:
         for index in range(30)
     ]
 
-    output = format_ruff_check(errors)
+    output = format_findings(
+        errors,
+        name="ruff",
+        empty_message="No lint issues found.",
+        render_line=lambda finding: f"  {finding.file}:{finding.line}",
+    )
 
     assert "Top rules:" in output
     assert "Top files:" in output
-    assert "file_0.py:1:1" in output
+    assert "file_0.py:1" in output
 
 
-def test_large_ty_result_uses_aggregate_layout() -> None:
+def test_filter_ty_level() -> None:
     errors = [
-        TyError(
-            file=f"file_{index % 6}.py",
-            line=index + 1,
-            col=1,
-            level="error",
-            code="invalid-assignment",
-            message="issue",
-        )
-        for index in range(30)
+        Finding(file="a.py", line=1, col=1, level="error", code="E", message="e"),
+        Finding(file="a.py", line=2, col=1, level="warning", code="W", message="w"),
+        Finding(file="a.py", line=3, col=1, level="info", code="I", message="i"),
     ]
 
-    output = format_ty_check(errors)
-
-    assert "Top rules:" in output
-    assert "Top files:" in output
+    assert len(filter_ty_level(errors, "error")) == 1
+    assert len(filter_ty_level(errors, "warning")) == 1
+    assert len(filter_ty_level(errors, "all")) == 3
 
 
 def test_metrics_report_processed_savings() -> None:
@@ -154,7 +256,9 @@ def test_metrics_report_processed_savings() -> None:
 
 def test_native_runner_uses_structured_outputs(tmp_path: Path) -> None:
     (tmp_path / "bad.py").write_text("import sys\n")
-    result = ToolRunner(command_prefix="").ruff_check(["bad.py"], tmp_path)
+    result = ToolRunner(command_prefix="").run(
+        TOOLS["ruff_check"], ["bad.py"], tmp_path
+    )
 
     assert result.exit_code == 1
     assert "F401" in result.output

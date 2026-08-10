@@ -1,6 +1,6 @@
 ---
 name: python-mcp
-description: Use when the python-mcp MCP server is available to run ruff_check, ruff_format, or ty_check on a Python project. Prefer its compact read-only diagnostics for linting, format verification, and type checking.
+description: Use when the python-mcp MCP server is available for compact, read-only Python quality checks including linting, formatting, type checking, security, dependencies, test collection, dead-code, and spelling analysis.
 license: MIT
 compatibility: Requires the python-mcp MCP server connected to the agent.
 metadata:
@@ -22,8 +22,14 @@ files.
 | Lint Python code | `ruff_check` | `paths?: list[str]`, `changed_only?: bool` |
 | Verify formatting | `ruff_format` | `paths?: list[str]`, `changed_only?: bool` |
 | Type check | `ty_check` | `paths?: list[str]`, `level?: "all"|"error"|"warning"`, `changed_only?: bool` |
+| Find dead code | `vulture_check` | `paths?: list[str]`, `changed_only?: bool` |
+| Find security issues | `bandit_check` | `paths?: list[str]`, `changed_only?: bool` |
+| Check dependencies | `deptry_check` | `paths?: list[str]`, `changed_only?: bool` |
+| Verify test collection | `pytest_collect` | `paths?: list[str]`, `changed_only?: bool` |
+| Find spelling issues | `codespell_check` | `paths?: list[str]`, `changed_only?: bool` |
+| Check docstrings | `pydoclint_check` | `paths?: list[str]`, `changed_only?: bool` |
 
-Use these MCP tools instead of shelling out to `ruff` or `ty` when they are in
+Use these MCP tools instead of shelling out to the underlying quality tools when they are in
 the tool context. Their output is structured and intentionally compact.
 
 ## Fast Feedback
@@ -33,7 +39,13 @@ After changing Python code:
 1. Run `ruff_check(changed_only=true)`.
 2. Run `ruff_format(changed_only=true)`.
 3. Run `ty_check(level="error", changed_only=true)`.
-4. Fix the reported files and rerun the affected check until it passes.
+4. Run `vulture_check(changed_only=true)`.
+5. Run `bandit_check(changed_only=true)`.
+6. Run `deptry_check(changed_only=true)`.
+7. Run `pytest_collect(changed_only=true)`.
+8. Run `codespell_check(changed_only=true)`.
+9. Run `pydoclint_check(changed_only=true)`.
+10. Fix the reported files and rerun the affected check until it passes.
 
 Use `ty_check(level="all")` when warnings are relevant to the task. A filtered
 result can contain zero displayed diagnostics while the underlying command still
@@ -46,6 +58,12 @@ Before finishing a change, run the checks across the project:
 1. `ruff_check()`
 2. `ruff_format()`
 3. `ty_check(level="error")`
+4. `vulture_check()`
+5. `bandit_check()`
+6. `deptry_check()`
+7. `pytest_collect()`
+8. `codespell_check()`
+9. `pydoclint_check()`
 
 `ruff_format` only reports files that need formatting. Apply formatting through
 the project's authorized editing workflow, then rerun `ruff_format` to verify
