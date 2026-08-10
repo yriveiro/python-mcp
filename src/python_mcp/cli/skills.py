@@ -37,7 +37,8 @@ def install_skill(
         force: Overwrite an existing installation.
 
     Returns:
-        The destination directory and the list of installed files.
+        tuple[Path, list[str]]: The destination directory and the list of
+        installed files.
 
     Raises:
         ValueError: If the skill is unknown or already installed.

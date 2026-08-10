@@ -5,7 +5,7 @@ requires = [ "hatchling" ]
 [project]
 name = "python-mcp"
 version = "0.1.0"
-description = "Model Context Protocol (MCP) server for running ruff and ty with token-efficient output"
+description = "Model Context Protocol (MCP) server for Python code-quality checks with token-efficient output"
 readme = "README.md"
 license = { text = "MIT" }
 authors = [ { name = "Yago Riveiro", email = "yago.riveiro@gmail.com" } ]
@@ -23,7 +23,6 @@ dependencies = [
   "rich>=15.0.0",
   "typer>=0.27.1",
 ]
-optional-dependencies.dev = [ "pytest", "ruff", "ty" ]
 urls."Bug Tracker" = "https://github.com/yriveiro/python-mcp/issues"
 urls.Homepage = "https://github.com/yriveiro/python-mcp"
 scripts.python-mcp = "python_mcp.cli:run"
@@ -31,7 +30,15 @@ scripts.python_mcp = "python_mcp.cli:run"
 
 [dependency-groups]
 dev = [
+  "bandit>=1.9.4",
+  "codespell>=2.4.3",
+  "deptry>=0.25.1",
+  "pydoclint>=0.9.1",
   "pyproject-fmt>=2.27",
+  "pytest>=9.1.1",
+  "ruff",
+  "ty",
+  "vulture",
 ]
 
 [tool.hatch]
@@ -47,3 +54,8 @@ lint.select = [ "B", "E", "F", "I", "SIM", "UP" ]
 [tool.pytest]
 ini_options.testpaths = [ "tests" ]
 ini_options.python_files = "test_*.py"
+
+[tool.pydoclint]
+style = "google"
+arg-type-hints-in-docstring = false
+exclude = '\.git|\.tox|\.venv|^venv|node_modules'

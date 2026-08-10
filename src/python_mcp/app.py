@@ -19,7 +19,7 @@ async def lifespan(_server: FastMCP) -> AsyncIterator[ServerContext]:
         _server: The FastMCP server instance, unused.
 
     Yields:
-        A ServerContext exposing the tool runner and project directory.
+        ServerContext: The shared services for the server lifetime.
     """
     settings = Settings()
     configure_logging(settings)
@@ -37,9 +37,12 @@ async def lifespan(_server: FastMCP) -> AsyncIterator[ServerContext]:
 app = FastMCP(
     "python-mcp",
     instructions=(
-        "Run ruff and ty on Python projects with token-efficient output. "
-        "Use ruff_check to lint, ruff_format to verify formatting, and "
-        "ty_check to type check. Prefer changed_only=true for fast feedback "
+        "Run Python code-quality checks with token-efficient output. Use ruff_check "
+        "to lint, ruff_format to verify formatting, ty_check to type check, "
+        "vulture_check for dead-code analysis, bandit_check for security, "
+        "deptry_check for dependencies, pytest_collect for test collection, and "
+        "codespell_check for spelling. "
+        "Prefer changed_only=true for fast feedback "
         "on recently edited files, and pass paths with glob patterns to "
         "narrow the scope."
     ),

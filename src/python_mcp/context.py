@@ -13,7 +13,7 @@ class ServerContext:
     Per-server shared services created by the lifespan.
 
     Attributes:
-        runner: Executes ruff and ty with token-efficient output.
+        runner: Executes code-quality checks with token-efficient output.
         project_dir: Directory that checks run against.
     """
 
@@ -29,6 +29,6 @@ def services(ctx: Context) -> ServerContext:
         ctx: FastMCP request context.
 
     Returns:
-        The shared services created by the server lifespan.
+        ServerContext: The shared services created by the server lifespan.
     """
     return cast(ServerContext, ctx.lifespan_context)

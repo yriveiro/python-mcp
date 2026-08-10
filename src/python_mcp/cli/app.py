@@ -6,7 +6,7 @@ from python_mcp.cli.skills import skill_app
 from python_mcp.settings import Settings, configure_logging
 
 app = typer.Typer(
-    help="MCP server for running ruff and ty with token-efficient output.",
+    help="MCP server for Python code-quality checks with token-efficient output.",
     no_args_is_help=False,
 )
 app.add_typer(skill_app, name="skill")
